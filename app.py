@@ -1,1135 +1,727 @@
-# cafe_cashier_bot.py
-import os
 import telebot
 from telebot import types
 import psycopg2
 from psycopg2 import Error
+from datetime import datetime, timedelta
+import os
 from functools import wraps
-from datetime import datetime
+
+
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_URI = os.environ.get("DB_URI")
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")  
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")  
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# نگهداری سشن‌های لاگین و دادهٔ موقتی کاربران
-# ساختار پیشنهادی:
-# user_sessions = { chat_id: { "logged_in": True/False, "temp": {...} } }
+# دیکشنری برای ذخیره وضعیت لاگین کاربران
 user_sessions = {}
 
-def ensure_session(chat_id):
-    if chat_id not in user_sessions:
-        user_sessions[chat_id] = {"logged_in": False, "temp": {}}
-    return user_sessions[chat_id]
-
 def check_login(chat_id):
-    sess = ensure_session(chat_id)
-    return sess.get("logged_in", False)
+    """بررسی آیا کاربر لاگین کرده است"""
+    return user_sessions.get(chat_id, False)
 
 def login_required(func):
+    """دکوراتور برای بررسی لاگین"""
     @wraps(func)
     def wrapper(message, *args, **kwargs):
         if not check_login(message.chat.id):
-            bot.send_message(message.chat.id, "لطفاً ابتدا وارد سیستم شوید.", reply_markup=login_menu())
+            bot.send_message(message.chat.id, "لطفاً ابتدا وارد سیستم شوید.")
+            ask_for_username(message)
             return
         return func(message, *args, **kwargs)
     return wrapper
 
 def get_db_connection():
     try:
-        conn = psycopg2.connect(DB_URI)
-        return conn
+        connection = psycopg2.connect(DB_URI)
+        return connection
     except Error as e:
-        print("خطا در اتصال به پایگاه داده:", e)
+        print(f"خطا در اتصال به پایگاه داده: {e}")
         return None
 
 def create_tables():
     conn = get_db_connection()
     if conn is None:
-        print("اتصال DB برقرار نشد — جداول ساخته نشد.")
         return
     try:
         cur = conn.cursor()
+        
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS category (
+            CREATE TABLE IF NOT EXISTS members (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR NOT NULL UNIQUE
+                full_name VARCHAR NOT NULL,
+                phone VARCHAR,
+                email VARCHAR,
+                address TEXT,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
             );
         """)
+        
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS products (
+            CREATE TABLE IF NOT EXISTS books (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR NOT NULL,
-                price NUMERIC(10,2) NOT NULL,
-                category_id INTEGER REFERENCES category(id) ON DELETE SET NULL
+                title VARCHAR NOT NULL,
+                author VARCHAR NOT NULL,
+                isbn VARCHAR UNIQUE,
+                publication_year INTEGER,
+                total_copies INTEGER DEFAULT 1,
+                available_copies INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS customers (
+            CREATE TABLE IF NOT EXISTS borrowings (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR NOT NULL,
-                phone VARCHAR
+                book_id INTEGER REFERENCES books(id) ON DELETE CASCADE,
+                member_id INTEGER REFERENCES members(id) ON DELETE CASCADE,
+                borrow_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                due_date TIMESTAMP NOT NULL,
+                return_date TIMESTAMP,
+                is_returned BOOLEAN DEFAULT FALSE
             );
         """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id SERIAL PRIMARY KEY,
-                customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
-                order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                total NUMERIC(10,2) DEFAULT 0,
-                status VARCHAR(20) DEFAULT 'pending' -- pending, served, cancelled
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS order_items (
-                id SERIAL PRIMARY KEY,
-                order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
-                product_id INTEGER REFERENCES products(id),
-                quantity INTEGER NOT NULL CHECK (quantity > 0),
-                price_at_order NUMERIC(10,2) NOT NULL
-            );
-        """)
+        
         conn.commit()
+        print("جداول با موفقیت ایجاد یا بررسی شدند.")
         cur.close()
-        print("جداول ساخته یا بررسی شدند.")
     except Error as e:
-        print("خطا در ایجاد جداول:", e)
+        print(f"خطا در ایجاد جداول: {e}")
     finally:
         if conn:
             conn.close()
 
-# ---------- کیبوردها ----------
 def login_menu():
+    """منوی لاگین"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    markup.add(types.KeyboardButton('ورود به سیستم'))
+    btn = types.KeyboardButton('ورود به سیستم')
+    markup.add(btn)
     return markup
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('محصولات'),
-        types.KeyboardButton('دسته‌بندی‌ها'),
-        types.KeyboardButton('ثبت سفارش'),
-        types.KeyboardButton('مشاهده سفارش‌ها'),
-        types.KeyboardButton('خروج از سیستم')
-    )
+    btn1 = types.KeyboardButton('نمایش کتاب‌ها')
+    btn2 = types.KeyboardButton('نمایش اعضا')
+    btn3 = types.KeyboardButton('اضافه کردن کتاب')
+    btn4 = types.KeyboardButton('اضافه کردن عضو')
+    btn5 = types.KeyboardButton('امانت دادن کتاب')
+    btn6 = types.KeyboardButton('پس گرفتن کتاب')
+    btn7 = types.KeyboardButton('جستجوی کتاب')
+    btn8 = types.KeyboardButton('وضعیت کتاب‌های امانت‌رفته')
+    btn9 = types.KeyboardButton('خروج از سیستم')
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9)
     return markup
 
-def products_menu():
+def search_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('لیست محصولات'),
-        types.KeyboardButton('اضافه کردن محصول'),
-        types.KeyboardButton('ویرایش محصول'),
-        types.KeyboardButton('حذف محصول'),
-        types.KeyboardButton('بازگشت')
-    )
+    btn1 = types.KeyboardButton('جستجو با عنوان')
+    btn2 = types.KeyboardButton('جستجو با نویسنده')
+    btn3 = types.KeyboardButton('بازگشت به منوی اصلی')
+    markup.add(btn1, btn2, btn3)
     return markup
 
-def categories_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('لیست کتگوری‌ها'),
-        types.KeyboardButton('اضافه کردن کتگوری'),
-        types.KeyboardButton('ویرایش کتگوری'),
-        types.KeyboardButton('حذف کتگوری'),
-        types.KeyboardButton('بازگشت')
-    )
-    return markup
-
-def order_status_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('pending'),
-        types.KeyboardButton('served'),
-        types.KeyboardButton('cancelled'),
-        types.KeyboardButton('بازگشت')
-    )
-    return markup
-
-# ---------- لاگین ----------
 @bot.message_handler(commands=['start', 'login'])
-def cmd_start(message):
+def start_command(message):
+    """شروع ربات و درخواست لاگین"""
     chat_id = message.chat.id
-    sess = ensure_session(chat_id)
-    if sess.get("logged_in"):
-        bot.send_message(chat_id, "شما از قبل وارد شده‌اید.", reply_markup=main_menu())
+    
+    # اگر کاربر قبلاً لاگین کرده، به منوی اصلی برو
+    if check_login(chat_id):
+        send_welcome(message)
         return
-    text = "به ربات صندوق کافه خوش آمدید!\nلطفاً وارد شوید."
-    bot.send_message(chat_id, text, reply_markup=login_menu())
+    
+    welcome_text = """
+به سیستم مدیریت کتابخانه خوش آمدید!
+لطفاً برای ادامه وارد سیستم شوید.
+برای ورود دکمه زیر را فشار دهید:
+"""
+    bot.send_message(chat_id, welcome_text, reply_markup=login_menu())
 
-@bot.message_handler(func=lambda m: m.text == 'ورود به سیستم')
-def ask_username(m):
-    chat_id = m.chat.id
+@bot.message_handler(func=lambda message: message.text == 'ورود به سیستم')
+def ask_for_username(message):
+    """درخواست نام کاربری"""
+    chat_id = message.chat.id
     msg = bot.send_message(chat_id, "نام کاربری را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(msg, process_username)
 
 def process_username(message):
+    """پردازش نام کاربری و درخواست رمز عبور"""
     chat_id = message.chat.id
     username = message.text.strip()
-    sess = ensure_session(chat_id)
-    sess['temp']['username'] = username
+    
+    # ذخیره نام کاربری موقت در session
+    if 'temp_data' not in user_sessions:
+        user_sessions['temp_data'] = {}
+    user_sessions['temp_data'][chat_id] = {'username': username}
+    
     msg = bot.send_message(chat_id, "رمز عبور را وارد کنید:")
-    bot.register_next_step_handler(msg, process_password)
+    bot.register_next_step_handler(msg, process_password, username)
 
-def process_password(message):
+def process_password(message, username):
+    """بررسی نام کاربری و رمز عبور"""
     chat_id = message.chat.id
     password = message.text.strip()
-    sess = ensure_session(chat_id)
-    username = sess['temp'].get('username')
+    
+    # بررسی اعتبار نام کاربری و رمز عبور
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        sess['logged_in'] = True
-        sess['temp'] = {}
-        bot.send_message(chat_id, "ورود با موفقیت انجام شد.", reply_markup=main_menu())
+        user_sessions[chat_id] = True
+        bot.send_message(chat_id, " ورود موفقیت‌آمیز بود!")
+        send_welcome(message)
     else:
-        sess['temp'] = {}
-        bot.send_message(chat_id, "نام کاربری یا رمز عبور اشتباه است.", reply_markup=login_menu())
+        bot.send_message(chat_id, " نام کاربری یا رمز عبور اشتباه است.")
+        ask_for_username(message)
 
-@bot.message_handler(func=lambda m: m.text == 'خروج از سیستم')
+@bot.message_handler(func=lambda message: message.text == 'خروج از سیستم')
 @login_required
-def logout(m):
-    chat_id = m.chat.id
+def logout_command(message):
+    """خروج از سیستم"""
+    chat_id = message.chat.id
     if chat_id in user_sessions:
-        user_sessions[chat_id] = {"logged_in": False, "temp": {}}
-    bot.send_message(chat_id, "از سیستم خارج شدید.", reply_markup=login_menu())
+        del user_sessions[chat_id]
+    
+    # پاک کردن داده‌های موقت
+    if 'temp_data' in user_sessions and chat_id in user_sessions['temp_data']:
+        del user_sessions['temp_data'][chat_id]
+    
+    bot.send_message(chat_id, " با موفقیت از سیستم خارج شدید.", reply_markup=login_menu())
 
-# ---------- محصولات ----------
-@bot.message_handler(func=lambda m: m.text == 'محصولات')
+@bot.message_handler(commands=['menu', 'help'])
 @login_required
-def products_root(m):
-    bot.send_message(m.chat.id, "مدیریت محصولات:", reply_markup=products_menu())
+def send_welcome(message):
+    chat_id = message.chat.id
+    welcome_text = """
+ سیستم مدیریت کتابخانه
+لطفاً یکی از گزینه‌های زیر را انتخاب کنید:
+"""
+    bot.send_message(chat_id, welcome_text, reply_markup=main_menu())
 
-@bot.message_handler(func=lambda m: m.text == 'لیست محصولات')
+@bot.message_handler(func=lambda message: message.text == 'نمایش کتاب‌ها')
 @login_required
-def list_products(m):
+def show_books(message):
     conn = get_db_connection()
     if conn is None:
-        bot.send_message(m.chat.id, "خطا در اتصال به پایگاه داده.")
+        bot.send_message(message.chat.id, "خطا در اتصال به پایگاه داده.")
         return
+    
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT p.id, p.name, p.price, c.name
-            FROM products p
-            LEFT JOIN category c ON p.category_id = c.id
-            ORDER BY p.id
+            SELECT id, title, author, available_copies, total_copies 
+            FROM books 
+            ORDER BY title
         """)
-        rows = cur.fetchall()
-        if not rows:
-            bot.send_message(m.chat.id, "هیچ محصولی ثبت نشده است.")
+        books = cur.fetchall()
+        
+        if not books:
+            bot.send_message(message.chat.id, "هیچ کتابی در کتابخانه ثبت نشده است.")
             return
-        text = "لیست محصولات:\n\n"
-        for r in rows:
-            cat = r[3] if r[3] else "بدون دسته"
-            text += f"کد: {r[0]} — {r[1]} — {r[2]:.2f} تومان — دسته: {cat}\n"
-        bot.send_message(m.chat.id, text)
+        
+        response = "لیست کتاب‌ها:\n\n"
+        for book in books:
+            status = "موجود" if book[3] > 0 else "امانت"
+            response += f"{book[1]}\n"
+            response += f"نویسنده: {book[2]}\n"
+            response += f"موجودی: {book[3]}/{book[4]} - {status}\n"
+            response += f"کد کتاب: {book[0]}\n"
+            response += "-" * 30 + "\n"
+        
+        bot.send_message(message.chat.id, response, parse_mode='Markdown')
         cur.close()
     except Error as e:
-        bot.send_message(m.chat.id, f"خطا: {e}")
+        bot.send_message(message.chat.id, f"خطا در دریافت اطلاعات: {e}")
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
-@bot.message_handler(func=lambda m: m.text == 'اضافه کردن محصول')
+@bot.message_handler(func=lambda message: message.text == 'نمایش اعضا')
 @login_required
-def add_product_start(m):
-    msg = bot.send_message(m.chat.id, "نام محصول را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, add_product_name)
-
-def add_product_name(message):
-    chat_id = message.chat.id
-    name = message.text.strip()
-    if not name:
-        bot.send_message(chat_id, "نام نامعتبر است.")
-        return
-    sess = ensure_session(chat_id)
-    sess['temp']['new_product'] = {'name': name}
-    bot.send_message(chat_id, "قیمت محصول را وارد کنید (به تومان):")
-    bot.register_next_step_handler(bot.send_message(chat_id, "قیمت:"), add_product_price)  # workaround to show prompt and wait
-    # Actually register next handler properly:
-def add_product_price(message):
-    chat_id = message.chat.id
-    sess = ensure_session(chat_id)
-    if 'new_product' not in sess['temp']:
-        bot.send_message(chat_id, "خطا در روند اضافه کردن محصول.")
-        return
-    try:
-        price = float(message.text.strip())
-        if price < 0:
-            raise ValueError()
-    except:
-        bot.send_message(chat_id, "قیمت نامعتبر است. مقدار را به صورت عدد وارد کنید.")
-        return
-    sess['temp']['new_product']['price'] = round(price, 2)
-    # نمایش دسته‌ها برای انتخاب
+def show_members(message):
     conn = get_db_connection()
     if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال به DB.")
+        bot.send_message(message.chat.id, "خطا در اتصال به پایگاه داده.")
         return
+    
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, name FROM category ORDER BY name")
-        cats = cur.fetchall()
-        text = "شناسه دسته را انتخاب کنید یا 0 برای عدم انتخاب/ایجاد دسته جدید وارد کنید:\n"
-        for c in cats:
-            text += f"{c[0]} — {c[1]}\n"
-        bot.send_message(chat_id, text)
-        msg = bot.send_message(chat_id, "شناسه دسته (یا 0):")
-        bot.register_next_step_handler(msg, add_product_category)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-def add_product_category(message):
-    chat_id = message.chat.id
-    sess = ensure_session(chat_id)
-    newp = sess['temp'].get('new_product')
-    if not newp:
-        bot.send_message(chat_id, "خطا در روند اضافه کردن محصول.")
-        return
-    cat_text = message.text.strip()
-    try:
-        cat_id = int(cat_text)
-    except:
-        bot.send_message(chat_id, "شناسه دسته باید عدد باشد.")
-        return
-
-    if cat_id == 0:
-        # اجازهٔ وارد کردن نام دسته جدید یا خالی
-        msg = bot.send_message(chat_id, "نام دسته جدید را وارد کنید (یا 'بدون' برای بدون دسته):")
-        bot.register_next_step_handler(msg, add_product_insert, cat_id)
-        return
-    # در صورت انتخاب دستهٔ موجود، چک و وارد DB
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال به DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM category WHERE id = %s", (cat_id,))
-        if cur.fetchone() is None:
-            bot.send_message(chat_id, "دسته‌ای با این شناسه یافت نشد.")
-            return
         cur.execute("""
-            INSERT INTO products (name, price, category_id)
-            VALUES (%s, %s, %s) RETURNING id
-        """, (newp['name'], newp['price'], cat_id))
-        prod_id = cur.fetchone()[0]
-        conn.commit()
-        bot.send_message(chat_id, f"محصول ثبت شد. کد محصول: {prod_id}", reply_markup=main_menu())
-        sess['temp'].pop('new_product', None)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا در ثبت محصول: {e}")
-    finally:
-        if conn: conn.close()
-
-def add_product_insert(message, prev_cat_id):
-    # prev_cat_id not used here except to indicate 0 case
-    chat_id = message.chat.id
-    sess = ensure_session(chat_id)
-    newp = sess['temp'].get('new_product')
-    if not newp:
-        bot.send_message(chat_id, "خطا در روند اضافه کردن محصول.")
-        return
-    cat_name = message.text.strip()
-    if cat_name.lower() == 'بدون':
-        category_id = None
-    else:
-        # ایجاد یا بازیابی دسته
-        conn = get_db_connection()
-        if conn is None:
-            bot.send_message(chat_id, "خطا در اتصال به DB.")
+            SELECT id, full_name, phone, email, join_date 
+            FROM members 
+            WHERE is_active = TRUE 
+            ORDER BY full_name
+        """)
+        members = cur.fetchall()
+        
+        if not members:
+            bot.send_message(message.chat.id, "هیچ عضوی ثبت نشده است.")
             return
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM category WHERE name = %s", (cat_name,))
-            row = cur.fetchone()
-            if row:
-                category_id = row[0]
-            else:
-                cur.execute("INSERT INTO category (name) VALUES (%s) RETURNING id", (cat_name,))
-                category_id = cur.fetchone()[0]
-            cur.execute("""
-                INSERT INTO products (name, price, category_id)
-                VALUES (%s, %s, %s) RETURNING id
-            """, (newp['name'], newp['price'], category_id))
-            prod_id = cur.fetchone()[0]
-            conn.commit()
-            bot.send_message(chat_id, f"محصول با موفقیت ثبت شد. کد محصول: {prod_id}", reply_markup=main_menu())
-            sess['temp'].pop('new_product', None)
-            cur.close()
-        except Error as e:
-            bot.send_message(chat_id, f"خطا در ثبت: {e}")
-        finally:
-            if conn: conn.close()
+        
+        response = "لیست اعضای کتابخانه:\n\n"
+        for member in members:
+            join_date = member[4].strftime('%Y-%m-%d')
+            response += f"{member[1]}\n"
+            response += f"تلفن: {member[2] or 'ثبت نشده'}\n"
+            response += f"ایمیل: {member[3] or 'ثبت نشده'}\n"
+            response += f"تاریخ عضویت: {join_date}\n"
+            response += f"کد عضو: {member[0]}\n"
+            response += "-" * 30 + "\n"
+        
+        bot.send_message(message.chat.id, response, parse_mode='Markdown')
+        cur.close()
+    except Error as e:
+        bot.send_message(message.chat.id, f"خطا در دریافت اطلاعات: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-@bot.message_handler(func=lambda m: m.text == 'ویرایش محصول')
+@bot.message_handler(func=lambda message: message.text == 'اضافه کردن عضو')
 @login_required
-def edit_product_start(m):
-    msg = bot.send_message(m.chat.id, "کد محصولی که می‌خواهید ویرایش کنید را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, edit_product_select)
-
-def edit_product_select(message):
+def add_member_command(message):
     chat_id = message.chat.id
-    pid_text = message.text.strip()
-    if not pid_text.isdigit():
-        bot.send_message(chat_id, "کد محصول باید عدد باشد.")
-        return
-    pid = int(pid_text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, price, category_id FROM products WHERE id = %s", (pid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "محصول یافت نشد.")
-            return
-        sess = ensure_session(chat_id)
-        sess['temp']['edit_product'] = {'id': row[0], 'name': row[1], 'price': float(row[2]), 'category_id': row[3]}
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add('ویرایش نام', 'ویرایش قیمت', 'ویرایش دسته', 'بازگشت')
-        bot.send_message(chat_id, f"محصول انتخاب شد: {row[1]} — {row[2]:.2f}", reply_markup=markup)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
+    msg = bot.send_message(chat_id, "لطفاً نام کامل عضو جدید را وارد کنید:")
+    bot.register_next_step_handler(msg, process_member_name)
 
-@bot.message_handler(func=lambda m: m.text in ['ویرایش نام', 'ویرایش قیمت', 'ویرایش دسته'])
-@login_required
-def edit_product_field(m):
-    chat_id = m.chat.id
-    text = m.text
-    sess = ensure_session(chat_id)
-    if 'edit_product' not in sess['temp']:
-        bot.send_message(chat_id, "هیچ محصولی برای ویرایش انتخاب نشده است.")
-        return
-    if text == 'ویرایش نام':
-        msg = bot.send_message(chat_id, "نام جدید را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-        bot.register_next_step_handler(msg, perform_edit_name)
-    elif text == 'ویرایش قیمت':
-        msg = bot.send_message(chat_id, "قیمت جدید را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-        bot.register_next_step_handler(msg, perform_edit_price)
-    elif text == 'ویرایش دسته':
-        # نمایش دسته‌ها
-        conn = get_db_connection()
-        if conn is None:
-            bot.send_message(chat_id, "خطا در اتصال DB.")
-            return
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id, name FROM category ORDER BY name")
-            cats = cur.fetchall()
-            textc = "شناسه دسته را وارد کنید یا 0 برای بدون دسته:\n"
-            for c in cats:
-                textc += f"{c[0]} — {c[1]}\n"
-            bot.send_message(chat_id, textc)
-            msg = bot.send_message(chat_id, "شناسه دسته:")
-            bot.register_next_step_handler(msg, perform_edit_category)
-            cur.close()
-        except Error as e:
-            bot.send_message(chat_id, f"خطا: {e}")
-        finally:
-            if conn: conn.close()
-
-def perform_edit_name(message):
+def process_member_name(message):
     chat_id = message.chat.id
-    new_name = message.text.strip()
-    sess = ensure_session(chat_id)
-    pid = sess['temp']['edit_product']['id']
-    if not new_name:
-        bot.send_message(chat_id, "نام نامعتبر است.")
+    full_name = message.text.strip()
+    
+    if not full_name or len(full_name) < 2:
+        bot.send_message(chat_id, "نام وارد شده معتبر نیست. لطفاً دوباره تلاش کنید.")
         return
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE products SET name = %s WHERE id = %s", (new_name, pid))
-        conn.commit()
-        bot.send_message(chat_id, "نام محصول با موفقیت ویرایش شد.", reply_markup=main_menu())
-        sess['temp'].pop('edit_product', None)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
+    
+    msg = bot.send_message(chat_id, "لطفاً شماره تلفن عضو را وارد کنید (اختیاری):")
+    bot.register_next_step_handler(msg, process_member_phone, full_name)
 
-def perform_edit_price(message):
-    chat_id = message.chat.id
-    try:
-        price = float(message.text.strip())
-        if price < 0:
-            raise ValueError()
-    except:
-        bot.send_message(chat_id, "قیمت نامعتبر است.")
-        return
-    sess = ensure_session(chat_id)
-    pid = sess['temp']['edit_product']['id']
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE products SET price = %s WHERE id = %s", (round(price,2), pid))
-        conn.commit()
-        bot.send_message(chat_id, "قیمت محصول با موفقیت به‌روزرسانی شد.", reply_markup=main_menu())
-        sess['temp'].pop('edit_product', None)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-def perform_edit_category(message):
-    chat_id = message.chat.id
-    cat_text = message.text.strip()
-    try:
-        cat_id = int(cat_text)
-    except:
-        bot.send_message(chat_id, "شناسه دسته باید عدد باشد.")
-        return
-    sess = ensure_session(chat_id)
-    pid = sess['temp']['edit_product']['id']
-    if cat_id == 0:
-        new_cat = None
-    else:
-        conn = get_db_connection()
-        if conn is None:
-            bot.send_message(chat_id, "خطا در اتصال DB.")
-            return
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM category WHERE id = %s", (cat_id,))
-            if cur.fetchone() is None:
-                bot.send_message(chat_id, "دسته‌ای با این شناسه یافت نشد.")
-                return
-            cur.close()
-            new_cat = cat_id
-        except Error as e:
-            bot.send_message(chat_id, f"خطا: {e}")
-            return
-        finally:
-            if conn: conn.close()
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE products SET category_id = %s WHERE id = %s", (new_cat, pid))
-        conn.commit()
-        bot.send_message(chat_id, "دسته محصول به‌روزرسانی شد.", reply_markup=main_menu())
-        sess['temp'].pop('edit_product', None)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.message_handler(func=lambda m: m.text == 'حذف محصول')
-@login_required
-def delete_product_start(m):
-    msg = bot.send_message(m.chat.id, "کد محصول برای حذف را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, delete_product_confirm)
-
-def delete_product_confirm(message):
-    chat_id = message.chat.id
-    pid_text = message.text.strip()
-    if not pid_text.isdigit():
-        bot.send_message(chat_id, "کد محصول باید عدد باشد.")
-        return
-    pid = int(pid_text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM products WHERE id = %s", (pid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "محصول یافت نشد.")
-            return
-        name = row[0]
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("حذف کن", callback_data=f"delprod:{pid}"))
-        markup.add(types.InlineKeyboardButton("انصراف", callback_data="cancel"))
-        bot.send_message(chat_id, f"آیا می‌خواهید محصول '{name}' حذف شود؟", reply_markup=markup)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("delprod:"))
-def callback_delete_product(call):
-    chat_id = call.message.chat.id
-    pid = int(call.data.split(":",1)[1])
-    conn = get_db_connection()
-    if conn is None:
-        bot.answer_callback_query(call.id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM products WHERE id = %s", (pid,))
-        conn.commit()
-        bot.edit_message_text("محصول حذف شد.", chat_id, call.message.message_id)
-        cur.close()
-    except Error as e:
-        bot.answer_callback_query(call.id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-# ---------- دسته‌بندی‌ها ----------
-@bot.message_handler(func=lambda m: m.text == 'دسته‌بندی‌ها')
-@login_required
-def categories_root(m):
-    bot.send_message(m.chat.id, "مدیریت دسته‌بندی‌ها:", reply_markup=categories_menu())
-
-@bot.message_handler(func=lambda m: m.text == 'لیست کتگوری‌ها')
-@login_required
-def list_categories(m):
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(m.chat.id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, name FROM category ORDER BY name")
-        rows = cur.fetchall()
-        if not rows:
-            bot.send_message(m.chat.id, "هیچ دسته‌ای ثبت نشده است.")
-            return
-        text = "دسته‌ها:\n"
-        for r in rows:
-            text += f"{r[0]} — {r[1]}\n"
-        bot.send_message(m.chat.id, text)
-        cur.close()
-    except Error as e:
-        bot.send_message(m.chat.id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.message_handler(func=lambda m: m.text == 'اضافه کردن کتگوری')
-@login_required
-def add_category_start(m):
-    msg = bot.send_message(m.chat.id, "نام دسته جدید را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, add_category_insert)
-
-def add_category_insert(message):
-    chat_id = message.chat.id
-    name = message.text.strip()
-    if not name:
-        bot.send_message(chat_id, "نام نامعتبر است.")
-        return
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO category (name) VALUES (%s) RETURNING id", (name,))
-        cid = cur.fetchone()[0]
-        conn.commit()
-        bot.send_message(chat_id, f"دسته ثبت شد. کد: {cid}", reply_markup=categories_menu())
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا در ثبت دسته: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.message_handler(func=lambda m: m.text == 'ویرایش کتگوری')
-@login_required
-def edit_category_start(m):
-    msg = bot.send_message(m.chat.id, "کد دسته‌ای که می‌خواهید ویرایش کنید را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, edit_category_select)
-
-def edit_category_select(message):
-    chat_id = message.chat.id
-    cid_text = message.text.strip()
-    if not cid_text.isdigit():
-        bot.send_message(chat_id, "کد دسته باید عدد باشد.")
-        return
-    cid = int(cid_text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM category WHERE id = %s", (cid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "دسته یافت نشد.")
-            return
-        bot.send_message(chat_id, f"نام فعلی: {row[0]}\nنام جدید را وارد کنید:")
-        bot.register_next_step_handler(bot.send_message(chat_id, "نام جدید:"), lambda msg, cid=cid: perform_edit_category_name(msg, cid))
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-def perform_edit_category_name(message, cid):
-    chat_id = message.chat.id
-    new_name = message.text.strip()
-    if not new_name:
-        bot.send_message(chat_id, "نام نامعتبر است.")
-        return
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE category SET name = %s WHERE id = %s", (new_name, cid))
-        conn.commit()
-        bot.send_message(chat_id, "دسته با موفقیت ویرایش شد.", reply_markup=categories_menu())
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.message_handler(func=lambda m: m.text == 'حذف کتگوری')
-@login_required
-def delete_category_start(m):
-    msg = bot.send_message(m.chat.id, "کد دسته برای حذف را وارد کنید (توجه: محصولات مرتبط دسته‌شان NULL خواهد شد):", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, delete_category_confirm)
-
-def delete_category_confirm(message):
-    chat_id = message.chat.id
-    cid_text = message.text.strip()
-    if not cid_text.isdigit():
-        bot.send_message(chat_id, "کد دسته باید عدد باشد.")
-        return
-    cid = int(cid_text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM category WHERE id = %s", (cid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "دسته یافت نشد.")
-            return
-        name = row[0]
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("حذف", callback_data=f"delcat:{cid}"))
-        markup.add(types.InlineKeyboardButton("انصراف", callback_data="cancel"))
-        bot.send_message(chat_id, f"آیا می‌خواهید دسته '{name}' حذف شود؟", reply_markup=markup)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("delcat:"))
-def callback_delete_category(call):
-    cid = int(call.data.split(":",1)[1])
-    conn = get_db_connection()
-    if conn is None:
-        bot.answer_callback_query(call.id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        # حذف دسته — محصولات مرتبط category_id = NULL خواهد شد بخاطر ON DELETE SET NULL (یا می‌توانیم دستی انجام دهیم)
-        cur.execute("DELETE FROM category WHERE id = %s", (cid,))
-        conn.commit()
-        bot.edit_message_text("دسته حذف شد.", call.message.chat.id, call.message.message_id)
-        cur.close()
-    except Error as e:
-        bot.answer_callback_query(call.id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-# ---------- سفارش‌گیری ----------
-@bot.message_handler(func=lambda m: m.text == 'ثبت سفارش')
-@login_required
-def start_order(m):
-    chat_id = m.chat.id
-    # گزینه: انتخاب مشتری یا افزودن مشتری جدید
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add('انتخاب مشتری', 'اضافه کردن مشتری', 'انصراف')
-    bot.send_message(chat_id, "می‌خواهید با کدام مشتری سفارش ثبت شود؟", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == 'اضافه کردن مشتری')
-@login_required
-def add_customer_start(m):
-    msg = bot.send_message(m.chat.id, "نام مشتری را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, add_customer_name)
-
-def add_customer_name(message):
-    chat_id = message.chat.id
-    name = message.text.strip()
-    if not name:
-        bot.send_message(chat_id, "نام نامعتبر است.")
-        return
-    sess = ensure_session(chat_id)
-    sess['temp']['new_customer'] = {'name': name}
-    msg = bot.send_message(chat_id, "شماره تلفن را وارد کنید (اختیاری):")
-    bot.register_next_step_handler(msg, add_customer_insert)
-
-def add_customer_insert(message):
+def process_member_phone(message, full_name):
     chat_id = message.chat.id
     phone = message.text.strip() if message.text else None
-    sess = ensure_session(chat_id)
-    cust = sess['temp'].pop('new_customer', None)
-    if not cust:
-        bot.send_message(chat_id, "خطا در افزودن مشتری.")
-        return
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO customers (name, phone) VALUES (%s, %s) RETURNING id", (cust['name'], phone))
-        cid = cur.fetchone()[0]
-        conn.commit()
-        bot.send_message(chat_id, f"مشتری ثبت شد. کد مشتری: {cid}\nحال می‌توانید سفارش را ادامه دهید.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('انتخاب مشتری'))
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
+    
+    msg = bot.send_message(chat_id, "لطفاً ایمیل عضو را وارد کنید:")
+    bot.register_next_step_handler(msg, process_member_email, full_name, phone)
 
-@bot.message_handler(func=lambda m: m.text == 'انتخاب مشتری')
-@login_required
-def select_customer_start(m):
-    chat_id = m.chat.id
-    msg = bot.send_message(chat_id, "لطفاً کد مشتری را وارد کنید (یا 'list' برای نمایش مشتریان):", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, select_customer_process)
-
-def select_customer_process(message):
+def process_member_email(message, full_name, phone):
     chat_id = message.chat.id
-    text = message.text.strip()
-    if text.lower() == 'list':
-        # نمایش مشتریان
-        conn = get_db_connection()
-        if conn is None:
-            bot.send_message(chat_id, "خطا در اتصال DB.")
-            return
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id, name, phone FROM customers ORDER BY name")
-            rows = cur.fetchall()
-            if not rows:
-                bot.send_message(chat_id, "هیچ مشتری ثبت نشده است.")
-                return
-            txt = "مشتریان:\n"
-            for r in rows:
-                txt += f"{r[0]} — {r[1]} — {r[2] or '-'}\n"
-            bot.send_message(chat_id, txt)
-            # دوباره درخواست کد
-            msg = bot.send_message(chat_id, "کد مشتری را وارد کنید:")
-            bot.register_next_step_handler(msg, select_customer_process)
-            cur.close()
-        except Error as e:
-            bot.send_message(chat_id, f"خطا: {e}")
-        finally:
-            if conn: conn.close()
-        return
+    email = message.text.strip() if message.text else None
+    
+    msg = bot.send_message(chat_id, "لطفاً آدرس عضو را وارد کنید:")
+    bot.register_next_step_handler(msg, process_member_address, full_name, phone, email)
 
-    if not text.isdigit():
-        bot.send_message(chat_id, "کد مشتری باید عدد یا 'list' باشد.")
-        return
-    cid = int(text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, name FROM customers WHERE id = %s", (cid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "مشتری یافت نشد.")
-            return
-        sess = ensure_session(chat_id)
-        sess['temp']['current_order'] = {'customer_id': cid, 'items': []}
-        bot.send_message(chat_id, f"مشتری انتخاب شد: {row[1]}\nحالا محصولات را اضافه کنید.\nبرای دیدن لیست محصولات 'list' وارد کنید.\nبرای پایان و ثبت سفارش 'done' وارد کنید.", reply_markup=types.ReplyKeyboardRemove())
-        msg = bot.send_message(chat_id, "کد محصول یا 'list' یا 'done':")
-        bot.register_next_step_handler(msg, add_order_item)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-def add_order_item(message):
+def process_member_address(message, full_name, phone, email):
     chat_id = message.chat.id
-    text = message.text.strip()
-    sess = ensure_session(chat_id)
-    if 'current_order' not in sess['temp']:
-        bot.send_message(chat_id, "هیچ سفارشی در جریان نیست. ابتدا مشتری را انتخاب کنید.")
-        return
-    order = sess['temp']['current_order']
-    if text.lower() == 'list':
-        # نمایش محصولات
-        conn = get_db_connection()
-        if conn is None:
-            bot.send_message(chat_id, "خطا در اتصال DB.")
-            return
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id, name, price FROM products ORDER BY id")
-            rows = cur.fetchall()
-            if not rows:
-                bot.send_message(chat_id, "هیچ محصولی ثبت نشده است.")
-            else:
-                txt = "محصولات:\n"
-                for r in rows:
-                    txt += f"{r[0]} — {r[1]} — {r[2]:.2f}\n"
-                bot.send_message(chat_id, txt)
-            cur.close()
-        except Error as e:
-            bot.send_message(chat_id, f"خطا: {e}")
-        finally:
-            if conn: conn.close()
-        msg = bot.send_message(chat_id, "کد محصول یا 'done':")
-        bot.register_next_step_handler(msg, add_order_item)
-        return
-    if text.lower() == 'done':
-        # ثبت سفارش نهایی
-        if not order['items']:
-            bot.send_message(chat_id, "هیچ آیتمی اضافه نشده است. سفارش لغو شد.")
-            sess['temp'].pop('current_order', None)
-            return
-        save_order(chat_id, order)
-        sess['temp'].pop('current_order', None)
-        return
-    # در غیر این صورت انتظار داریم یک کد محصول عددی
-    if not text.isdigit():
-        bot.send_message(chat_id, "کد محصول باید عدد، 'list' یا 'done' باشد.")
-        return
-    pid = int(text)
-    # درخواست تعداد
-    sess['temp']['pending_product'] = pid
-    msg = bot.send_message(chat_id, "تعداد را وارد کنید:")
-    bot.register_next_step_handler(msg, add_order_item_quantity)
-
-def add_order_item_quantity(message):
-    chat_id = message.chat.id
-    qty_text = message.text.strip()
-    sess = ensure_session(chat_id)
-    if 'pending_product' not in sess['temp'] or 'current_order' not in sess['temp']:
-        bot.send_message(chat_id, "خطا در روند افزودن آیتم.")
-        return
-    if not qty_text.isdigit():
-        bot.send_message(chat_id, "تعداد باید عدد صحیح مثبت باشد.")
-        return
-    qty = int(qty_text)
-    if qty < 1:
-        bot.send_message(chat_id, "تعداد باید بزرگتر از صفر باشد.")
-        return
-    pid = sess['temp'].pop('pending_product')
-    # گرفتن قیمت فعلی محصول
+    address = message.text.strip() if message.text else None
+    
     conn = get_db_connection()
     if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
         return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT name, price FROM products WHERE id = %s", (pid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "محصول یافت نشد.")
-            return
-        pname, price = row[0], float(row[1])
-        # اضافه کردن به سفارش موقتی
-        order = sess['temp']['current_order']
-        order['items'].append({'product_id': pid, 'name': pname, 'quantity': qty, 'price': price})
-        bot.send_message(chat_id, f"آیتم اضافه شد: {pname} x {qty} — واحد: {price:.2f}")
-        # ادامهٔ اضافه کردن
-        msg = bot.send_message(chat_id, "کد محصول بعدی یا 'list' یا 'done':")
-        bot.register_next_step_handler(msg, add_order_item)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-def save_order(chat_id, order):
-    # محاسبهٔ مجموع
-    total = sum(item['quantity'] * item['price'] for item in order['items'])
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO orders (customer_id, total, status) VALUES (%s, %s, %s) RETURNING id, order_date", (order['customer_id'], round(total,2), 'pending'))
-        row = cur.fetchone()
-        order_id = row[0]
-        order_date = row[1]
-        # درج آیتم‌ها
-        for it in order['items']:
-            cur.execute("""
-                INSERT INTO order_items (order_id, product_id, quantity, price_at_order)
-                VALUES (%s, %s, %s, %s)
-            """, (order_id, it['product_id'], it['quantity'], round(it['price'],2)))
-        conn.commit()
-        bot.send_message(chat_id, f"سفارش ثبت شد.\nکد سفارش: {order_id}\nتاریخ: {order_date.strftime('%Y-%m-%d %H:%M')}\nمجموع: {total:.2f} تومان", reply_markup=main_menu())
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا در ثبت سفارش: {e}")
-    finally:
-        if conn: conn.close()
-
-# ---------- مشاهده سفارش‌ها ----------
-@bot.message_handler(func=lambda m: m.text == 'مشاهده سفارش‌ها')
-@login_required
-def view_orders_menu(m):
-    chat_id = m.chat.id
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('لیست سفارش‌ها', 'جستجوی سفارش', 'بازگشت')
-    bot.send_message(chat_id, "مدیریت سفارش‌ها:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == 'لیست سفارش‌ها')
-@login_required
-def list_orders(m):
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(m.chat.id, "خطا در اتصال DB.")
-        return
+    
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT o.id, c.name, o.order_date, o.total, o.status
-            FROM orders o
-            LEFT JOIN customers c ON o.customer_id = c.id
-            ORDER BY o.order_date DESC
-            LIMIT 50
+            INSERT INTO members (full_name, phone, email, address)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """, (full_name, phone, email, address))
+        
+        member_id = cur.fetchone()[0]
+        conn.commit()
+        
+        bot.send_message(chat_id, f"عضو جدید با موفقیت ثبت شد!\nکد عضویت: {member_id}")
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در ثبت عضو: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'اضافه کردن کتاب')
+@login_required
+def add_book_command(message):
+    chat_id = message.chat.id
+    msg = bot.send_message(chat_id, "لطفاً عنوان کتاب را وارد کنید:")
+    bot.register_next_step_handler(msg, process_book_title)
+
+def process_book_title(message):
+    chat_id = message.chat.id
+    title = message.text.strip()
+    
+    if not title or len(title) < 2:
+        bot.send_message(chat_id, "عنوان وارد شده معتبر نیست.")
+        return
+    
+    msg = bot.send_message(chat_id, "لطفاً نام نویسنده را وارد کنید:")
+    bot.register_next_step_handler(msg, process_book_author, title)
+
+def process_book_author(message, title):
+    chat_id = message.chat.id
+    author = message.text.strip()
+    
+    if not author or len(author) < 2:
+        bot.send_message(chat_id, "نام نویسنده معتبر نیست.")
+        return
+    
+    msg = bot.send_message(chat_id, "لطفاً تعداد نسخه‌های کتاب را وارد کنید (پیش‌فرض: 1):")
+    bot.register_next_step_handler(msg, process_book_copies, title, author)
+
+def process_book_copies(message, title, author):
+    chat_id = message.chat.id
+    copies_text = message.text.strip()
+    
+    try:
+        copies = int(copies_text) if copies_text else 1
+        if copies < 1:
+            copies = 1
+    except:
+        copies = 1
+    
+    msg = bot.send_message(chat_id, "لطفاً سال انتشار کتاب را وارد کنید (اختیاری):")
+    bot.register_next_step_handler(msg, process_book_year, title, author, copies)
+
+def process_book_year(message, title, author, copies):
+    chat_id = message.chat.id
+    year_text = message.text.strip()
+    year = int(year_text) if year_text and year_text.isdigit() else None
+    
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO books (title, author, total_copies, available_copies, publication_year)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (title, author, copies, copies, year))
+        
+        book_id = cur.fetchone()[0]
+        conn.commit()
+        
+        bot.send_message(chat_id, f"کتاب جدید با موفقیت ثبت شد!\nکد کتاب: {book_id}")
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در ثبت کتاب: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'امانت دادن کتاب')
+@login_required
+def borrow_book_command(message):
+    chat_id = message.chat.id
+    msg = bot.send_message(chat_id, "لطفاً کد کتاب را وارد کنید:")
+    bot.register_next_step_handler(msg, process_borrow_book_id)
+
+def process_borrow_book_id(message):
+    chat_id = message.chat.id
+    book_id = message.text.strip()
+    
+    if not book_id.isdigit():
+        bot.send_message(chat_id, "کد کتاب باید عدد باشد.")
+        return
+    
+    msg = bot.send_message(chat_id, "لطفاً کد عضو را وارد کنید:")
+    bot.register_next_step_handler(msg, process_borrow_member_id, int(book_id))
+
+def process_borrow_member_id(message, book_id):
+    chat_id = message.chat.id
+    member_id = message.text.strip()
+    
+    if not member_id.isdigit():
+        bot.send_message(chat_id, "کد عضو باید عدد باشد.")
+        return
+    
+    msg = bot.send_message(chat_id, "برای چند روز امانت داده شود؟ (پیش‌فرض: 14 روز)")
+    bot.register_next_step_handler(msg, process_borrow_days, book_id, int(member_id))
+
+def process_borrow_days(message, book_id, member_id):
+    chat_id = message.chat.id
+    days_text = message.text.strip()
+    
+    try:
+        days = int(days_text) if days_text else 14
+        if days < 1:
+            days = 14
+    except:
+        days = 14
+    
+    due_date = datetime.now() + timedelta(days=days)
+    
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("SELECT available_copies, title FROM books WHERE id = %s", (book_id,))
+        book_info = cur.fetchone()
+        
+        if not book_info:
+            bot.send_message(chat_id, "کتابی با این کد یافت نشد.")
+            return
+        
+        if book_info[0] < 1:
+            bot.send_message(chat_id, f"کتاب '{book_info[1]}' در حال حاضر موجود نیست.")
+            return
+        
+        cur.execute("SELECT full_name FROM members WHERE id = %s AND is_active = TRUE", (member_id,))
+        member_info = cur.fetchone()
+        
+        if not member_info:
+            bot.send_message(chat_id, "عضوی با این کد یافت نشد یا غیرفعال است.")
+            return
+        
+        cur.execute("""
+            INSERT INTO borrowings (book_id, member_id, due_date)
+            VALUES (%s, %s, %s)
+        """, (book_id, member_id, due_date))
+        
+        cur.execute("""
+            UPDATE books 
+            SET available_copies = available_copies - 1 
+            WHERE id = %s
+        """, (book_id,))
+        
+        conn.commit()
+        
+        due_date_str = due_date.strftime('%Y-%m-%d')
+        bot.send_message(chat_id, f"کتاب '{book_info[1]}' به '{member_info[0]}' امانت داده شد.\nموعد بازگشت: {due_date_str}")
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در ثبت امانت: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'پس گرفتن کتاب')
+@login_required
+def return_book_command(message):
+    chat_id = message.chat.id
+    msg = bot.send_message(chat_id, "لطفاً کد کتاب را وارد کنید:")
+    bot.register_next_step_handler(msg, process_return_book)
+
+def process_return_book(message):
+    chat_id = message.chat.id
+    book_id = message.text.strip()
+    
+    if not book_id.isdigit():
+        bot.send_message(chat_id, "کد کتاب باید عدد باشد.")
+        return
+    
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT b.id, bk.title, m.full_name 
+            FROM borrowings b
+            JOIN books bk ON b.book_id = bk.id
+            JOIN members m ON b.member_id = m.id
+            WHERE b.book_id = %s AND b.is_returned = FALSE
+            ORDER BY b.borrow_date DESC LIMIT 1
+        """, (int(book_id),))
+        
+        borrowing = cur.fetchone()
+        
+        if not borrowing:
+            bot.send_message(chat_id, "هیچ امانت فعالی برای این کتاب یافت نشد.")
+            return
+        
+        cur.execute("""
+            UPDATE borrowings 
+            SET is_returned = TRUE, return_date = CURRENT_TIMESTAMP 
+            WHERE id = %s
+        """, (borrowing[0],))
+        
+        cur.execute("""
+            UPDATE books 
+            SET available_copies = available_copies + 1 
+            WHERE id = %s
+        """, (int(book_id),))
+        
+        conn.commit()
+        
+        bot.send_message(chat_id, f"کتاب '{borrowing[1]}' از '{borrowing[2]}' پس گرفته شد.")
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در پس گرفتن کتاب: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'جستجوی کتاب')
+@login_required
+def search_book_menu(message):
+    bot.send_message(message.chat.id, "لطفاً نوع جستجو را انتخاب کنید:", 
+                     reply_markup=search_menu())
+
+@bot.message_handler(func=lambda message: message.text == 'جستجو با عنوان')
+@login_required
+def search_by_title_command(message):
+    chat_id = message.chat.id
+    msg = bot.send_message(chat_id, "لطفاً بخشی از عنوان کتاب را وارد کنید:")
+    bot.register_next_step_handler(msg, search_by_title)
+
+def search_by_title(message):
+    chat_id = message.chat.id
+    keyword = f"%{message.text.strip()}%"
+    
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, author, available_copies 
+            FROM books 
+            WHERE title ILIKE %s 
+            ORDER BY title
+        """, (keyword,))
+        
+        books = cur.fetchall()
+        
+        if not books:
+            bot.send_message(chat_id, "کتابی با این عنوان یافت نشد.")
+            return
+        
+        response = f"نتایج جستجو برای '{message.text.strip()}':\n\n"
+        for book in books:
+            status = "موجود" if book[3] > 0 else "امانت"
+            response += f"{book[1]}\n"
+            response += f"نویسنده: {book[2]}\n"
+            response += f"وضعیت: {status}\n"
+            response += f"کد کتاب: {book[0]}\n"
+            response += "-" * 30 + "\n"
+        
+        bot.send_message(chat_id, response, parse_mode='Markdown')
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در جستجو: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'جستجو با نویسنده')
+@login_required
+def search_by_author_command(message):
+    chat_id = message.chat.id
+    msg = bot.send_message(chat_id, "لطفاً نام نویسنده را وارد کنید:")
+    bot.register_next_step_handler(msg, search_by_author)
+
+def search_by_author(message):
+    chat_id = message.chat.id
+    keyword = f"%{message.text.strip()}%"
+    
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(chat_id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, author, available_copies 
+            FROM books 
+            WHERE author ILIKE %s 
+            ORDER BY title
+        """, (keyword,))
+        
+        books = cur.fetchall()
+        
+        if not books:
+            bot.send_message(chat_id, "کتابی از این نویسنده یافت نشد.")
+            return
+        
+        response = f"نتایج جستجو برای نویسنده '{message.text.strip()}':\n\n"
+        for book in books:
+            status = "موجود" if book[3] > 0 else "امانت"
+            response += f"{book[1]}\n"
+            response += f"نویسنده: {book[2]}\n"
+            response += f"وضعیت: {status}\n"
+            response += f"کد کتاب: {book[0]}\n"
+            response += "-" * 30 + "\n"
+        
+        bot.send_message(chat_id, response, parse_mode='Markdown')
+        cur.close()
+    except Error as e:
+        bot.send_message(chat_id, f"خطا در جستجو: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+@bot.message_handler(func=lambda message: message.text == 'وضعیت کتاب‌های امانت‌رفته')
+@login_required
+def show_borrowed_books(message):
+    conn = get_db_connection()
+    if conn is None:
+        bot.send_message(message.chat.id, "خطا در اتصال به پایگاه داده.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 
+                b.title,
+                bk.author,
+                m.full_name,
+                br.borrow_date,
+                br.due_date,
+                CASE 
+                    WHEN br.due_date < CURRENT_DATE THEN 'معوقه'
+                    ELSE 'در امانت'
+                END as status
+            FROM borrowings br
+            JOIN books b ON br.book_id = b.id
+            JOIN members m ON br.member_id = m.id
+            JOIN books bk ON br.book_id = bk.id
+            WHERE br.is_returned = FALSE
+            ORDER BY br.due_date
         """)
-        rows = cur.fetchall()
-        if not rows:
-            bot.send_message(m.chat.id, "هیچ سفارشی ثبت نشده است.")
+        
+        borrowed = cur.fetchall()
+        
+        if not borrowed:
+            bot.send_message(message.chat.id, "هیچ کتابی در حال حاضر امانت نیست.")
             return
-        text = "سفارش‌ها:\n\n"
-        for r in rows:
-            cust = r[1] or "مشتری ناشناس"
-            text += f"سفارش #{r[0]} — {cust} — {r[2].strftime('%Y-%m-%d %H:%M')} — مجموع: {r[3]:.2f} — وضعیت: {r[4]}\n"
-        bot.send_message(m.chat.id, text)
+        
+        response = "کتاب‌های در حال امانت:\n\n"
+        for item in borrowed:
+            borrow_date = item[3].strftime('%Y-%m-%d')
+            due_date = item[4].strftime('%Y-%m-%d')
+            response += f"{item[0]}\n"
+            response += f"نویسنده: {item[1]}\n"
+            response += f"امانت گیرنده: {item[2]}\n"
+            response += f"تاریخ امانت: {borrow_date}\n"
+            response += f"موعد بازگشت: {due_date}\n"
+            response += f"وضعیت: {item[5]}\n"
+            response += "-" * 30 + "\n"
+        
+        bot.send_message(message.chat.id, response, parse_mode='Markdown')
         cur.close()
     except Error as e:
-        bot.send_message(m.chat.id, f"خطا: {e}")
+        bot.send_message(message.chat.id, f"خطا در دریافت اطلاعات: {e}")
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
-@bot.message_handler(func=lambda m: m.text == 'جستجوی سفارش')
+@bot.message_handler(func=lambda message: message.text == 'بازگشت به منوی اصلی')
 @login_required
-def search_order_start(m):
-    msg = bot.send_message(m.chat.id, "کد سفارش را وارد کنید:", reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, search_order_by_id)
-
-def search_order_by_id(message):
-    chat_id = message.chat.id
-    text = message.text.strip()
-    if not text.isdigit():
-        bot.send_message(chat_id, "کد سفارش باید عدد باشد.")
-        return
-    oid = int(text)
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT o.id, c.name, o.order_date, o.total, o.status
-            FROM orders o
-            LEFT JOIN customers c ON o.customer_id = c.id
-            WHERE o.id = %s
-        """, (oid,))
-        row = cur.fetchone()
-        if not row:
-            bot.send_message(chat_id, "سفارشی با این کد یافت نشد.")
-            return
-        text = f"سفارش #{row[0]} — {row[1] or 'مشتری ناشناس'} — {row[2].strftime('%Y-%m-%d %H:%M')} — مجموع: {row[3]:.2f} — وضعیت: {row[4]}\n\nآیتم‌ها:\n"
-        cur.execute("""
-            SELECT oi.quantity, oi.price_at_order, p.name
-            FROM order_items oi
-            LEFT JOIN products p ON oi.product_id = p.id
-            WHERE oi.order_id = %s
-        """, (oid,))
-        items = cur.fetchall()
-        for it in items:
-            text += f"{it[2] or 'محصول حذف شده'} — {it[0]} x {it[1]:.2f}\n"
-        # امکان تغییر وضعیت
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add('تغییر وضعیت', 'بازگشت')
-        bot.send_message(chat_id, text, reply_markup=markup)
-        # ذخیرهٔ id برای ویرایش احتمالی
-        sess = ensure_session(chat_id)
-        sess['temp']['last_viewed_order'] = oid
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا: {e}")
-    finally:
-        if conn: conn.close()
-
-@bot.message_handler(func=lambda m: m.text == 'تغییر وضعیت')
-@login_required
-def change_order_status_prompt(m):
-    chat_id = m.chat.id
-    sess = ensure_session(chat_id)
-    oid = sess['temp'].get('last_viewed_order')
-    if not oid:
-        bot.send_message(chat_id, "ابتدا یک سفارش را جستجو یا مشاهده کنید.")
-        return
-    bot.send_message(chat_id, "وضعیت جدید را انتخاب کنید:", reply_markup=order_status_menu())
-
-@bot.message_handler(func=lambda m: m.text in ['pending', 'served', 'cancelled'])
-@login_required
-def change_order_status(m):
-    chat_id = m.chat.id
-    new_status = m.text
-    sess = ensure_session(chat_id)
-    oid = sess['temp'].get('last_viewed_order')
-    if not oid:
-        bot.send_message(chat_id, "ابتدا یک سفارش را انتخاب کنید.")
-        return
-    conn = get_db_connection()
-    if conn is None:
-        bot.send_message(chat_id, "خطا در اتصال DB.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE orders SET status = %s WHERE id = %s", (new_status, oid))
-        conn.commit()
-        bot.send_message(chat_id, f"وضعیت سفارش #{oid} به '{new_status}' تغییر کرد.", reply_markup=main_menu())
-        sess['temp'].pop('last_viewed_order', None)
-        cur.close()
-    except Error as e:
-        bot.send_message(chat_id, f"خطا در تغییر وضعیت: {e}")
-    finally:
-        if conn: conn.close()
-
-# ---------- سایر هندلرها ----------
-@bot.message_handler(func=lambda m: m.text == 'بازگشت')
-@login_required
-def go_back(m):
-    bot.send_message(m.chat.id, "بازگشت به منوی اصلی.", reply_markup=main_menu())
-
-@bot.message_handler(func=lambda message: True)
-def fallback(message):
-    # پاسخ پیش‌فرض برای ورودی‌های شناخته نشده
-    if check_login(message.chat.id):
-        bot.send_message(message.chat.id, "لطفاً یکی از گزینه‌ها را از منو انتخاب کنید.", reply_markup=main_menu())
-    else:
-        bot.send_message(message.chat.id, "برای شروع /start را بزنید.", reply_markup=login_menu())
+def back_to_main_menu(message):
+    send_welcome(message)
 
 if __name__ == '__main__':
     create_tables()
-    print("Bot is running ...")
+    print("Running .....")
+
     bot.polling(none_stop=True)
